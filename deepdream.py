@@ -5,15 +5,20 @@ from __future__ import print_function
 import os
 import numpy as np
 from functools import partial
+from numpy.random import randn
 import cv2
 
 import argparse
 import tensorflow as tf
+from tensorflow.python.platform import gfile
+from tensorflow.python.framework import tensor_shape
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", default="inception5h/tensorflow_inception_graph.pb", help="location of the model to load")
+parser.add_argument("--model", default='inception5h/tensorflow_inception_graph.pb', help="location of the model to load")
 parser.add_argument("--mode", required=True, choices=["graph", "naive-vis", "multiscale-vis", "lapnorm", "dream"])
 parser.add_argument("--input_dir", help="path to folder containing images")
+parser.add_argument("--input_image", help="image to dream with", default="pilatus800.jpg")
+
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--seed", type=int)
 
@@ -37,17 +42,26 @@ sess = tf.InteractiveSession(graph=graph)
 with tf.gfile.FastGFile(model_fn, 'rb') as f:
     graph_def = tf.GraphDef()
     graph_def.ParseFromString(f.read())
-t_input = tf.placeholder(np.float32, name='input') # define the input tensor
+
+tensor_names = [n.name for n in graph_def.node]
+#with gfile.FastGFile(a.output_dir + "/tensors.json", 'wb') as f:
+#  f.write(str(tensor_names).replace("'","\""))
+
+tensor_name = "input"
+# define the input tensor
+t_input = tf.placeholder(np.float32, name=tensor_name)
 imagenet_mean = 117.0
 t_preprocessed = tf.expand_dims(t_input-imagenet_mean, 0)
-tf.import_graph_def(graph_def, {'input':t_preprocessed})
+tf.import_graph_def(graph_def, {tensor_name:t_preprocessed})
+
 
 layers = [op.name for op in graph.get_operations() if op.type=='Conv2D' and 'import/' in op.name]
 feature_nums = [int(graph.get_tensor_by_name(name+':0').get_shape()[-1]) for name in layers]
+feature_count = sum(feature_nums)
 
 print('Loaded model:', model_fn)
 print('Number of layers', len(layers))
-print('Total number of feature channels:', sum(feature_nums))
+print('Total number of feature channels:', feature_count)
 
 # Helper functions for TF Graph visualization
 
@@ -64,16 +78,7 @@ def strip_consts(graph_def, max_const_size=32):
                 tensor.tensor_content = tf.compat.as_bytes("<stripped %d bytes>"%size)
     return strip_def
 
-def rename_nodes(graph_def, rename_func):
-    res_def = tf.GraphDef()
-    for n0 in graph_def.node:
-        n = res_def.node.add()
-        n.MergeFrom(n0)
-        n.name = rename_func(n.name)
-        for i, s in enumerate(n.input):
-            n.input[i] = rename_func(s) if s[0]!='^' else '^'+rename_func(s[1:])
-    return res_def
-
+#
 def save_graph(graph_def, max_const_size=32):
 
     if hasattr(graph_def, 'as_graph_def'):
@@ -86,11 +91,23 @@ def save_graph(graph_def, max_const_size=32):
     with open("graph.txt", "w") as text_file:
         text_file.write(txt_out)
 
+#
+def rename_nodes(graph_def, rename_func):
+    res_def = tf.GraphDef()
+    for n0 in graph_def.node:
+        n = res_def.node.add()
+        n.MergeFrom(n0)
+        n.name = rename_func(n.name)
+        for i, s in enumerate(n.input):
+            n.input[i] = rename_func(s) if s[0]!='^' else '^'+rename_func(s[1:])
+    return res_def
+
 
 # ####################################################
 # Naive feature visualisation
 # ####################################################
-
+current_layer=None
+current_channel=0
 # start with a gray image with a little noise
 img_noise = np.random.uniform(size=(224,224,3)) + 100.0
 
@@ -98,9 +115,9 @@ def show_array(arr):
     img = np.uint8(np.clip(arr, 0, 1)*255)
     cv2.imshow('dst_rt', img)
 
-def save_array(arr, name):
+def save_array(arr, name, ext=".png"):
     img = np.uint8(np.clip(arr, 0, 1)*255)
-    cv2.imwrite(a.output_dir + "/" + name + ".png", img)
+    cv2.imwrite(a.output_dir + "/" + name + ext, img)
 
 def visstd(a, s=0.1):
     '''Normalize the image range for visualization'''
@@ -260,11 +277,12 @@ def render_lapnorm(name, t_obj, img0=img_noise, visfunc=visstd,
 # DeepDream
 # ####################################################
 
-def render_deepdream(name, t_obj, img0=img_noise,
+def render_deepdream(output_dir, name, t_obj, img0=img_noise,
                      iter_n=10, step=1.5, octave_n=4, octave_scale=1.4):
     t_score = tf.reduce_mean(t_obj) # defining the optimization objective
     t_grad = tf.gradients(t_score, t_input)[0] # behold the power of automatic differentiation!
-    print(t_grad)
+
+    print("Rendering ", name, octave_n, output_dir)
 
     # split the image into a number of octaves
     img = img0
@@ -284,9 +302,10 @@ def render_deepdream(name, t_obj, img0=img_noise,
         for i in range(iter_n):
             g = calc_grad_tiled(img, t_grad)
             img += g*(step / (np.abs(g).mean()+1e-7))
-            print('.',end = ' ')
+            #print('.',end = ' ')
 
-        save_array(img/255.0, name + '_deepdream_oct-{:d}'.format(octave))
+        print(output_dir + "/octave_{:d}/".format(octave) + name)
+        save_array(img/255.0, output_dir + "/octave_{:d}/".format(octave) + name, ".jpg")
 
 
 
@@ -298,8 +317,7 @@ def main():
 
     if(a.mode == "graph"):
         print("Dumping model graph...")
-        # Visualizing the network graph. Be sure expand the "mixed" nodes to see their
-        # internal structure. We are going to visualize "Conv2D" nodes.
+        # A dump of the graph structure. We are going to visualize "Conv2D" nodes.
         tmp_def = rename_nodes(graph_def, lambda s:"/".join(s.split('_',1)))
         save_graph(tmp_def)
 
@@ -311,22 +329,27 @@ def main():
 
         if(a.mode == "naive-vis"):
             print('naive-vis')
+            #cv2.waitKey(0)
             render_naive(T(layer_name)[:,:,:,channel])
             cv2.waitKey(0)
 
         elif(a.mode == "multiscale-vis"):
             print('multiscale-vis')
-            render_multiscale(T(layer_name)[:,:,:,channel])
+            render_multiscale(T(layer_name)[:,:,:,480])
             cv2.waitKey(0)
 
         elif(a.mode == "lapnorm"):
 
-            render_lapnorm("a", T(layer_name)[:,:,:,channel])
+            render_lapnorm("c"+str(channel), T(layer_name)[:,:,:,channel])
 
-            render_lapnorm("b", T(layer_name)[:,:,:,65])
+            render_lapnorm("e7_c16", T(layer_name)[:,:,:,16])
+            render_lapnorm("e7_c139", T(layer_name)[:,:,:,139])
+            render_lapnorm("e7_c255", T(layer_name)[:,:,:,255])
+            render_lapnorm("e7_c480", T(layer_name)[:,:,:,480])
+            render_lapnorm("e7_c511", T(layer_name)[:,:,:,511])
 
             # Lower layers produce features of lower complexity.
-            render_lapnorm("c", T('mixed3b_1x1_pre_relu')[:,:,:,101])
+            render_lapnorm("e3_c101", T(layer_name)[:,:,:,101])
 
             # There are many interesting things one may try. For example, optimizing a linear combination of features often gives a "mixture" pattern.
             render_lapnorm("d", T(layer_name)[:,:,:,65]+T(layer_name)[:,:,:,139], octave_n=4)
@@ -335,25 +358,87 @@ def main():
 
         elif(a.mode == "dream"):
 
-            source_image = "pilatus800.jpg"
+            source_image = a.input_image
 
-            # load an image
-            img0 = cv2.imread(a.input_dir + "/" + source_image)
-            #img0 = np.float32(img0)
-            #show_array(img0/255.0)
-            #cv2.imshow('input image', img0)
-            #cv2.waitKey(0)
+            if(source_image == "noise"):
+                img0 = np.random.uniform(size=(1024,2048,3)) #+ 100.0
+                #cv2.imshow('noise', img0)
+                #cv2.waitKey(0)
+                #exit(0)
+            else:
+                img0 = cv2.imread(a.input_dir + "/" + a.input_image)
 
             img0 = np.float32(img0)
 
-            render_deepdream("pilatus800-1", tf.square(T('mixed4c')), img0)
+            # todo - try other operations on the tensor - https://www.tensorflow.org/api_docs/python/tf/square
+            #render_deepdream(source_image + "_a", tf.square(T('mixed4c')), img0, 10, 1.5, 2, 1.4)
+            #render_deepdream(source_image + "_b", T('mixed4d_3x3_bottleneck_pre_relu'), img0)
 
-            # Using an arbitrary optimization objective still works:
-            render_deepdream("pilatus800-2", T(layer_name)[:,:,:,139], img0)
+            target_shape = T("mixed4d_3x3_bottleneck_pre_relu").shape
+            target_dims = len(target_shape)
+
+            # for finding layers to deepdream with we want to match ones with the same shapes/dims (?,?,?,int)
+            def dreamable_shape(shp):
+
+                if shp.dims is None: return False
+                if not len(shp) is target_dims: return False
+
+                for x in range(0, target_dims):
+                    if not type(shp[x].value) is type(target_shape[x].value):
+                        return False
+
+                return True
+
+            #print(dreamable_shape(T("input").shape)) # false
+            #print(dreamable_shape(T("mixed4c").shape)) # true
+            #print(dreamable_shape(T("mixed4d_3x3_bottleneck_pre_relu").shape)) # true
+
+            # dream settings
+            dd_iterations = 10
+            dd_step = 1.5
+            dd_octaves = 5
+            dd_octave_scale = 1.4
+
+
+            # number of channels to render per layer - layers will have different channel counts,
+            renders_per_layer = 1
+            r_count=0
+            channel_skip = 0
+
+            image_dir = source_image.split(".")[0]
+            dest_dir = a.output_dir + "/" + image_dir
+            if not os.path.exists(dest_dir):
+                os.makedirs(dest_dir)
+
+            for i in range(dd_octaves):
+                octavePath = dest_dir + "/octave_{:d}".format(i)
+                if not os.path.exists(octavePath):
+                    os.makedirs(octavePath)
+
+
+            for tn in tensor_names:
+                layer = T(tn)
+
+                # check is has dims and is compatible with the (?,?,?,int) shape we expect
+                if dreamable_shape(layer.shape):
+
+                    tnsr = tn.replace("/","__")
+                    channel_count = int(layer.shape[3])
+                    if renders_per_layer > channel_count: renders_per_layer = channel_count
+
+                    channel_skip = int(channel_count / (renders_per_layer+1))
+                    if(channel_skip <= 0): channel_skip = 1
+
+                    print("Processing " + tn + " ("+str(channel_count)+" channels) with channel_skip:", channel_skip)
+
+                    n = channel_count - channel_skip - 1
+                    while (n >= 0):
+                        dd_name = '{num:03d}_{tname}-{channel:03d}'.format(num=r_count, tname=tnsr, channel=n)
+                        render_deepdream(image_dir, dd_name, tf.square(layer[:,:,:,n]), img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
+                        n = n - channel_skip
+                        r_count = r_count + 1
+
 
             print("Done dreaming")
-            cv2.waitKey(0)
-            
-            # Don't hesitate to use higher resolution inputs (also increase the number of octaves)!
 
 main()
