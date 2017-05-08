@@ -16,16 +16,25 @@ from tensorflow.python.framework import tensor_shape
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", default='inception5h/tensorflow_inception_graph.pb', help="location of the model to load")
-parser.add_argument("--mode", required=True, choices=["graph", "naive-vis", "multiscale-vis", "lapnorm", "dream"])
+parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names"])
 parser.add_argument("--input_dir", help="path to folder containing images")
 parser.add_argument("--input_image", help="image to dream with", default="pilatus800.jpg")
-
 parser.add_argument("--output_dir", required=True, help="where to put output files")
-parser.add_argument("--seed", type=int, default=12345)
-parser.add_argument("--export_tensor_names", type=bool, default=False)
+parser.add_argument("--output_filetype", default="jpg", choices=["png", "jpg"])
+parser.add_argument("--export_tensor_names", type=bool, default=False, help="Export a list of all dreamable tensors as JSON")
+
+# use in dream mode
+parser.add_argument("--iterations", type=int, default=10)
+parser.add_argument("--step", type=float, default=1.5)
+parser.add_argument("--octaves", type=int, default=4)
+parser.add_argument("--octave_scale", type=float, default=1.4)
+parser.add_argument("--renders_per_layer", type=int, default=3, help="Number of channels to render from a layer. Set to zero to render all channels")
+parser.add_argument("--layer_name", default=None, help="Render channels from a single layer (use --export_tensor_names to get a list of all dreamable tensors)")
+parser.add_argument("--channel_number", default=-1, type=int, help="Specify a single channel to render. Only applicable when --layer_name is set")
+parser.add_argument("--resume_from_layer", default=None, help="Reume a previous deepdream sequence from a given layer (use --export_tensor_names to get a list of all dreamable tensors)")
 
 # export options
-parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
+parser.add_argument("--seed", default=123456, type=int)
 a = parser.parse_args()
 
 seed(a.seed)
@@ -52,15 +61,6 @@ t_input = tf.placeholder(np.float32, name='input')
 imagenet_mean = 117.0 # ? how is this value determined
 t_preprocessed = tf.expand_dims(t_input-imagenet_mean, 0)
 tf.import_graph_def(graph_def, {'input':t_preprocessed})
-
-
-layers = [op.name for op in graph.get_operations() if op.type=='Conv2D' and 'import/' in op.name]
-feature_nums = [int(graph.get_tensor_by_name(name+':0').get_shape()[-1]) for name in layers]
-feature_count = sum(feature_nums)
-
-print('Loaded model:', model_fn)
-print('Number of layers', len(layers))
-print('Total number of feature channels:', feature_count)
 
 # Helper functions for TF Graph visualization
 
@@ -114,9 +114,10 @@ def show_array(arr):
     img = np.uint8(np.clip(arr, 0, 1)*255)
     cv2.imshow('dst_rt', img)
 
-def save_array(arr, name, ext=".png"):
+# float array in, rgb uint8 out
+def save_array(arr, name, ext="png"):
     img = np.uint8(np.clip(arr, 0, 1)*255)
-    cv2.imwrite(a.output_dir + "/" + name + ext, img)
+    cv2.imwrite("{d}/{n}.{e}".format(d=a.output_dir, n=name, e=ext), img)
 
 def visstd(a, s=0.1):
     '''Normalize the image range for visualization'''
@@ -199,7 +200,7 @@ def render_multiscale(t_obj, img0=img_noise, iter_n=10, step=1.0, octave_n=3, oc
             #print('.', end = ' ')
 
         #show_array(visstd(img))
-        save_array(visstd(img), 'multiscale_ocatave_{:d}'.format(octave))
+        save_array(visstd(img), 'multiscale_ocatave_{:d}'.format(octave), a.output_filetype)
 
 
 # ####################################################
@@ -269,7 +270,7 @@ def render_lapnorm(name, t_obj, img0=img_noise, visfunc=visstd,
             img += g*step
             print('.', end = ' ')
 
-        save_array(visfunc(img), name + '_lapnorm_oct-{:d}'.format(octave))
+        save_array(visfunc(img), name + '_lapnorm_oct-{:d}'.format(octave), a.output_filetype)
 
 
 # ####################################################
@@ -307,10 +308,10 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
         if octave == octave_n-1:
             nfame = output_dir + "/" + name + "_octave-{:d}".format(octave+1)
             print("Saving:", nfame)
-            save_array(img/255.0, nfame, ".jpg")
+            save_array(img/255.0, nfame, a.output_filetype)
 
 
-# deepdream helpers
+# helpers
 # to find layers to deepdream with we want to match ones with the same shapes/dims as the examples (?,?,?,int)
 target_shape = T("mixed4d_3x3_bottleneck_pre_relu").shape
 target_dims = len(target_shape)
@@ -334,20 +335,20 @@ def dreamable_shape(name):
     return True
 
 
-# tensor_names = [n.name for n in graph_def.node]
-# collect and filter tensor names so we only attempt to dream with ones that have the required shape/dims
-dreamy_tensors = [n.name for n in graph_def.node if dreamable_shape(n.name)]
-#dreamy_tensors.reverse()
-
-if a.export_tensor_names:
-    with gfile.FastGFile(a.output_dir + "/tensors.json", 'wb') as f:
-        f.write(str(dreamy_tensors).replace("'","\""))
-
 # ####################################################
 # Main
 # ####################################################
 
+# collect and filter tensor names so we only attempt to dream with ones that have the required shape/dims
+dreamy_tensors = [n.name for n in graph_def.node if dreamable_shape(n.name)]
+feature_nums = [int(T(name).get_shape()[-1]) for name in dreamy_tensors]
+feature_count = sum(feature_nums)
+
 def main():
+
+    print('Loaded model:', model_fn)
+    print('Number of layers', len(dreamy_tensors))
+    print('Total number of feature channels:', feature_count)
 
     if(a.mode == "graph"):
         print("Dumping model graph...")
@@ -355,25 +356,26 @@ def main():
         tmp_def = rename_nodes(graph_def, lambda s:"/".join(s.split('_',1)))
         save_graph(tmp_def)
 
-    else:
-        # layer_name : The internal layer
-        layer_name='mixed4d_3x3_bottleneck_pre_relu'
-        # channel : The feature channel to visualize
-        channel=139
+    elif a.mode == "export_tensor_names":
+        # slightly different to graph mode - just exports the list of all dreamable tensor names
+        with gfile.FastGFile(a.output_dir + "/dreamy-tensors.json", 'wb') as f:
+            f.write(str(dreamy_tensors).replace("'","\""))
 
-        if(a.mode == "naive-vis"):
-            print('naive-vis')
+    else:
+
+        if(a.mode == "naive"):
+            print('naive')
             #cv2.waitKey(0)
-            render_naive(T(layer_name)[:,:,:,channel])
+            render_naive(T('mixed4d_3x3_bottleneck_pre_relu')[:,:,:,139])
             cv2.waitKey(0)
 
-        elif(a.mode == "multiscale-vis"):
-            print('multiscale-vis')
-            render_multiscale(T(layer_name)[:,:,:,480])
+        elif(a.mode == "multiscale"):
+            print('multiscale')
+            render_multiscale(T('mixed4d_3x3_bottleneck_pre_relu')[:,:,:,480])
             cv2.waitKey(0)
 
         elif(a.mode == "lapnorm"):
-
+            layer_name = "mixed4d_3x3_bottleneck_pre_relu"
             render_lapnorm("c"+str(channel), T(layer_name)[:,:,:,channel])
 
             render_lapnorm("e7_c16", T(layer_name)[:,:,:,16])
@@ -395,16 +397,15 @@ def main():
             source_image = a.input_image
 
             # dream settings
-            dd_iterations = 10
-            dd_step = 1.5
-            dd_octaves = 1
-            dd_octave_scale = 1.4
+            dd_iterations = a.iterations #10
+            dd_step = a.step #1.5
+            dd_octaves = a.octaves#3
+            dd_octave_scale = a.octave_scale#1.4
             # number of feature channels to render per layer
-            renders_per_layer = 3
+            renders_per_layer = a.renders_per_layer # set to zero to render all channels in a layer
 
             # manually set this to skip into the process and resume rendering dreams where you left off
-            start_tensor = None #"mixed3a_3x3_bottleneck_pre_relu/conv"
-
+            start_tensor = a.resume_from_layer #"mixed3a_3x3_bottleneck_pre_relu"
 
             # setup output directories
             image_dir = source_image.split(".")[0]
@@ -414,7 +415,7 @@ def main():
 
             # prepare the input image
             if(source_image == "noise"):
-                img0 = np.random.uniform(size=(512,512,3)) #+ 100.0
+                img0 = np.random.uniform(size=(1080,1920,3))
             else:
                 img0 = cv2.imread(a.input_dir + "/" + a.input_image)
 
@@ -424,44 +425,73 @@ def main():
             render_count=0
             channel_skip=0
             skip_count=0
-            have_started = False if start_tensor is not None else True
 
             layer_count = len(dreamy_tensors)
-            for i in range(layer_count):
+            layer_start = 0 if start_tensor is None else dreamy_tensors.index(start_tensor)
+
+            if layer_start < 0:
+                print("Layer {a} does not exist".format(a=layer_start))
+                exit()
+
+            # rendering a single, specific layer?
+            if a.layer_name is not None:
+                layer_start = dreamy_tensors.index(a.layer_name)
+                if layer_start < 0:
+                    print("Layer {a} does not exist".format(a=a.layer_name))
+                    exit()
+                else:
+                    print("Rendering from layer {a}".format(a=a.layer_name))
+                    layer_count = layer_start + 1
+            elif start_tensor is not None:
+                print("Resuming render from {t} (layer {n}/{k})".format(t=start_tensor, n=layer_start, k=layer_count))
+
+
+            render_index = layer_start * renders_per_layer
+
+            for i in range(layer_start, layer_count):
 
                 tn = dreamy_tensors[i]
-
-                # skipping in and starting at a specific tensor?
-                if not have_started and start_tensor is not None and tn == start_tensor:
-                    have_started = True
-                    render_count = skip_count * renders_per_layer
-                if not have_started:
-                    skip_count = skip_count + 1
-                    continue
 
                 layer = T(tn)
                 tnsr = tn.replace("/","__")
 
+                n=0
                 channel_count = int(layer.shape[3])
-                if renders_per_layer > channel_count or renders_per_layer <= 0: renders_per_layer = channel_count
 
-                channel_skip = int(math.ceil(channel_count / (renders_per_layer+1)))
-                if(channel_skip <= 0): channel_skip = 1
+                if a.channel_number >= 0:
+                    # render from a single channel
+                    if a.channel_number > channel_count:
+                        print("channel_number out of range. Layer {l} has {n} channels".format(l=tn, n=channel_count))
+                        exit()
 
-                print("Processing {i:d}/{n:d} {tn} ({cc:d} channels, renders_per_layer:{rpl:d} channel_skip:{cskip:d})"
-                .format(i=i,n=layer_count,tn=tn,cc=channel_count,rpl=renders_per_layer,cskip=channel_skip))
+                    n = a.channel_number
+                    channel_skip = channel_count
+                    channel_count = 1
 
-                n = channel_count - channel_skip - 1
+                else:
+                    # render multiple channels from the layer. uses renders_per_layer
+                    if renders_per_layer > channel_count or renders_per_layer <= 0: renders_per_layer = channel_count
+
+                    channel_skip = int(math.ceil(channel_count / (renders_per_layer+1)))
+                    if(channel_skip <= 0): channel_skip = 1
+
+                    n = channel_count - channel_skip - 1
+
+
+                print("Processing {i:d}/{n:d} {tn} ({cc:d} channels, renders_per_layer:{rpl:d})"
+                .format(i=i,n=layer_count,tn=tn,cc=channel_count,rpl=renders_per_layer))
+
                 while (n >= 0):
-                    dd_name = '{num:03d}-{tname}-{channel:03d}'.format(num=render_count, tname=tnsr, channel=n)
-                    render_deepdream(image_dir, dd_name, layer[:,:,:,n], img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
-                    render_count = render_count + 1
+                    dd_name = '{num:03d}-{tname}-{channel:03d}'.format(num=render_index, tname=tnsr, channel=n)
+                    render_deepdream(image_dir, dd_name, tf.square(layer[:,:,:,n]), img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
+                    render_index = render_index + 1
                     n = n - channel_skip
 
 
-            # todo - try other operations on the tensor - https://www.tensorflow.org/api_docs/python/tf/square
-            #render_deepdream(source_image + "_a", tf.square(T('mixed4c')), img0, 10, 1.5, 2, 1.4)
-            #render_deepdream(source_image + "_b", T('mixed4d_3x3_bottleneck_pre_relu'), img0)
+            # todo - try other operations on the tensor(s) and combine more than one - https://www.tensorflow.org/api_docs/python/tf/square
+
+            # There are many interesting things one may try. For example, optimizing a linear combination of features often gives a "mixture" pattern.
+            # dream_tensor = T(layer_name)[:,:,:,65]+T(layer_name)[:,:,:,139]
 
             print("Done dreaming")
 
