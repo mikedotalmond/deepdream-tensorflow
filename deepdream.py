@@ -8,6 +8,7 @@ from functools import partial
 from numpy.random import randn,seed
 import cv2
 import math
+import time
 
 import argparse
 import tensorflow as tf
@@ -334,7 +335,7 @@ def dreamable_shape(name):
 
     return True
 
-
+def now(): return int(time.time())
 # ####################################################
 # Main
 # ####################################################
@@ -401,8 +402,8 @@ def main():
             dd_step = a.step #1.5
             dd_octaves = a.octaves#3
             dd_octave_scale = a.octave_scale#1.4
-            # number of feature channels to render per layer
-            renders_per_layer = a.renders_per_layer # set to zero to render all channels in a layer
+            renders_per_layer = a.renders_per_layer
+            if renders_per_layer<0: renders_per_layer=0
 
             # manually set this to skip into the process and resume rendering dreams where you left off
             start_tensor = a.resume_from_layer #"mixed3a_3x3_bottleneck_pre_relu"
@@ -446,8 +447,6 @@ def main():
                 print("Resuming render from {t} (layer {n}/{k})".format(t=start_tensor, n=layer_start, k=layer_count))
 
 
-            render_index = layer_start * renders_per_layer
-
             for i in range(layer_start, layer_count):
 
                 tn = dreamy_tensors[i]
@@ -457,6 +456,8 @@ def main():
 
                 n=0
                 channel_count = int(layer.shape[3])
+                renders_per_layer = a.renders_per_layer
+                if renders_per_layer > channel_count or renders_per_layer <= 0: renders_per_layer = channel_count
 
                 if a.channel_number >= 0:
                     # render from a single channel
@@ -470,22 +471,20 @@ def main():
 
                 else:
                     # render multiple channels from the layer. uses renders_per_layer
-                    if renders_per_layer > channel_count or renders_per_layer <= 0: renders_per_layer = channel_count
-
-                    channel_skip = int(math.ceil(channel_count / (renders_per_layer+1)))
+                    channel_skip = channel_count / renders_per_layer
                     if(channel_skip <= 0): channel_skip = 1
 
-                    n = channel_count - channel_skip - 1
+                    n = channel_count - round(channel_skip/2)
+                    if n is channel_count: n = n-1
 
 
-                print("Processing {i:d}/{n:d} {tn} ({cc:d} channels, renders_per_layer:{rpl:d})"
-                .format(i=i,n=layer_count,tn=tn,cc=channel_count,rpl=renders_per_layer))
+                print("Processing {i:d}/{n:d} {tn} ({cc:d} channels, renders_per_layer:{rpl:d} channel_skip:{cskp})"
+                .format(i=i,n=layer_count,tn=tn,cc=channel_count,rpl=renders_per_layer,cskp=channel_skip))
 
                 while (n >= 0):
-                    dd_name = '{num:03d}-{tname}-{channel:03d}'.format(num=render_index, tname=tnsr, channel=n)
+                    dd_name = '{num:d}-{tname}-{channel:03d}'.format(num=now(), tname=tnsr, channel=n)
                     render_deepdream(image_dir, dd_name, tf.square(layer[:,:,:,n]), img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
-                    render_index = render_index + 1
-                    n = n - channel_skip
+                    n = round(n - channel_skip)
 
 
             # todo - try other operations on the tensor(s) and combine more than one - https://www.tensorflow.org/api_docs/python/tf/square
