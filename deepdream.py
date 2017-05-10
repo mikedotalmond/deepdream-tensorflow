@@ -5,7 +5,7 @@ from __future__ import print_function
 import os
 import numpy as np
 from functools import partial
-from numpy.random import randn,seed
+from numpy.random import randn,seed,randint
 import cv2
 import math
 import time
@@ -16,28 +16,28 @@ from tensorflow.python.platform import gfile
 from tensorflow.python.framework import tensor_shape
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", default='inception5h/tensorflow_inception_graph.pb', help="location of the model to load")
+parser.add_argument("--model", default='models/inception_graph.pb', help="location of the model to load")
 parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names"])
-parser.add_argument("--input_dir", help="path to folder containing images")
+parser.add_argument("--input_dir", help="path to folder containing images", default="images")
 parser.add_argument("--input_image", help="image to dream with", default="pilatus800.jpg")
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--output_filetype", default="jpg", choices=["png", "jpg"])
 parser.add_argument("--export_tensor_names", type=bool, default=False, help="Export a list of all dreamable tensors as JSON")
 
 # use in dream mode
+parser.add_argument("--input_tensor", default="input")
 parser.add_argument("--iterations", type=int, default=10)
 parser.add_argument("--step", type=float, default=1.5)
 parser.add_argument("--octaves", type=int, default=4)
 parser.add_argument("--octave_scale", type=float, default=1.4)
 parser.add_argument("--renders_per_layer", type=int, default=3, help="Number of channels to render from a layer. Set to zero to render all channels")
 parser.add_argument("--layer_name", default=None, help="Render channels from a single layer (use --export_tensor_names to get a list of all dreamable tensors)")
+parser.add_argument("--layer_names", default=None, help="Render channels from a list of layers. Expects a text file with each entry on a new line (use --export_tensor_names to get a list of all dreamable tensors)")
 parser.add_argument("--channel_number", default=-1, type=int, help="Specify a single channel to render. Only applicable when --layer_name is set")
 parser.add_argument("--resume_from_layer", default=None, help="Reume a previous deepdream sequence from a given layer (use --export_tensor_names to get a list of all dreamable tensors)")
 
-# export options
 parser.add_argument("--seed", default=123456, type=int)
 a = parser.parse_args()
-
 seed(a.seed)
 
 # ####################################################
@@ -58,10 +58,10 @@ with tf.gfile.FastGFile(model_fn, 'rb') as f:
     graph_def.ParseFromString(f.read())
 
 # define the input tensor
-t_input = tf.placeholder(np.float32, name='input')
+t_input = tf.placeholder(np.float32, name=a.input_tensor)
 imagenet_mean = 117.0 # ? how is this value determined
 t_preprocessed = tf.expand_dims(t_input-imagenet_mean, 0)
-tf.import_graph_def(graph_def, {'input':t_preprocessed})
+tf.import_graph_def(graph_def, {a.input_tensor:t_preprocessed})
 
 # Helper functions for TF Graph visualization
 
@@ -305,16 +305,17 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
             img += g*(step / (np.abs(g).mean()+1e-7))
             #print('.',end = ' ')
 
-        # only save top octave
         if octave == octave_n-1:
-            nfame = output_dir + "/" + name + "_octave-{:d}".format(octave+1)
-            print("Saving:", nfame)
-            save_array(img/255.0, nfame, a.output_filetype)
+            fname = output_dir + "/" + name + "_octave-{:d}".format(octave_n)
+            print("Saving:", fname)
+            save_array(img/255.0, fname, a.output_filetype)
 
 
 # helpers
+def now(): return int(time.time())
+
 # to find layers to deepdream with we want to match ones with the same shapes/dims as the examples (?,?,?,int)
-target_shape = T("mixed4d_3x3_bottleneck_pre_relu").shape
+target_shape = tf.TensorShape([None, None, None, 512])# T("mixed4d_3x3_bottleneck_pre_relu").shape
 target_dims = len(target_shape)
 
 # add layer names here to ignore them while dreaming
@@ -335,21 +336,40 @@ def dreamable_shape(name):
 
     return True
 
-def now(): return int(time.time())
+
 # ####################################################
 # Main
 # ####################################################
 
 # collect and filter tensor names so we only attempt to dream with ones that have the required shape/dims
-dreamy_tensors = [n.name for n in graph_def.node if dreamable_shape(n.name)]
-feature_nums = [int(T(name).get_shape()[-1]) for name in dreamy_tensors]
-feature_count = sum(feature_nums)
+def setup_layers():
+    names = None
+
+    if a.layer_names is not None:
+        # use a custom list of tensor names
+        print("loading layer names from file:", a.layer_names)
+        with open(a.layer_names) as f:
+            lines = f.read().splitlines()
+            names = [n for n in lines if dreamable_shape(n)]
+    else:
+        # use all of the dreamable tensors in the graph
+        names = [n.name for n in graph_def.node if dreamable_shape(n.name)]
+
+    feature_counts = [int(T(n).get_shape()[-1]) for n in names]
+    feature_count = sum(feature_counts)
+
+    print('Loaded model:', model_fn)
+    print('Number of layers', len(names))
+    print('Total number of feature channels:', feature_count)
+
+    return names
+
 
 def main():
 
-    print('Loaded model:', model_fn)
-    print('Number of layers', len(dreamy_tensors))
-    print('Total number of feature channels:', feature_count)
+    # names of all the layers we're going to dream with
+    dreamy_tensors = setup_layers()
+
 
     if(a.mode == "graph"):
         print("Dumping model graph...")
@@ -359,7 +379,8 @@ def main():
 
     elif a.mode == "export_tensor_names":
         # slightly different to graph mode - just exports the list of all dreamable tensor names
-        with gfile.FastGFile(a.output_dir + "/dreamy-tensors.json", 'wb') as f:
+        model_name = model_fn.split("\\")[-1]
+        with gfile.FastGFile("{dir}/{model}-tensors.json".format(dir=a.output_dir, model=model_name), 'wb') as f:
             f.write(str(dreamy_tensors).replace("'","\""))
 
     else:
