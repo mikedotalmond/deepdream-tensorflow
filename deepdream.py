@@ -34,7 +34,8 @@ parser.add_argument("--renders_per_layer", type=int, default=3, help="Number of 
 parser.add_argument("--layer_name", default=None, help="Render channels from a single layer (use --export_tensor_names to get a list of all dreamable tensors)")
 parser.add_argument("--layer_names", default=None, help="Render channels from a list of layers. Expects a text file with each entry on a new line (use --export_tensor_names to get a list of all dreamable tensors)")
 parser.add_argument("--channel_number", default=-1, type=int, help="Specify a single channel to render. Only applicable when --layer_name is set")
-parser.add_argument("--resume_from_layer", default=None, help="Reume a previous deepdream sequence from a given layer (use --export_tensor_names to get a list of all dreamable tensors)")
+parser.add_argument("--resume_from_layer", default=None, help="Resume a previous deepdream sequence from a given layer (use --export_tensor_names to get a list of all dreamable tensors)")
+parser.add_argument("--resume_from_channel", default=-1, type=int, help="Resume a previous deepdream sequence from a given channel of a layer. Only applies when --layer_name or --resume_from_layer are set")
 
 parser.add_argument("--seed", default=123456, type=int)
 a = parser.parse_args()
@@ -428,6 +429,7 @@ def main():
 
             # manually set this to skip into the process and resume rendering dreams where you left off
             start_tensor = a.resume_from_layer #"mixed3a_3x3_bottleneck_pre_relu"
+            start_channel = a.resume_from_channel
 
             # setup output directories
             image_dir = source_image.split(".")[0]
@@ -449,11 +451,14 @@ def main():
             skip_count=0
 
             layer_count = len(dreamy_tensors)
-            layer_start = 0 if start_tensor is None else dreamy_tensors.index(start_tensor)
+            layer_start = 0
 
-            if layer_start < 0:
-                print("Layer {a} does not exist".format(a=layer_start))
-                exit()
+            if start_tensor is not None:
+                if start_tensor in dreamy_tensors:
+                    layer_start = dreamy_tensors.index(start_tensor)
+                else:
+                    print("Layer {a} does not exist".format(a=layer_start))
+                    exit()
 
             # rendering a single, specific layer?
             if a.layer_name is not None:
@@ -467,6 +472,12 @@ def main():
             elif start_tensor is not None:
                 print("Resuming render from {t} (layer {n}/{k})".format(t=start_tensor, n=layer_start, k=layer_count))
 
+
+            channel_count = int(T(dreamy_tensors[layer_start]).shape[3])
+            if start_channel > -1 and start_channel < channel_count:
+                print("Resuming at channel ", start_channel)
+            else:
+                start_channel = -1
 
             for i in range(layer_start, layer_count):
 
@@ -495,24 +506,26 @@ def main():
                     channel_skip = channel_count / renders_per_layer
                     if(channel_skip <= 0): channel_skip = 1
 
-                    n = channel_count - round(channel_skip/2)
-                    if n is channel_count: n = n-1
+                    n = int(channel_count - (channel_skip/2))
+                    if n == channel_count: n = n-1
 
 
                 print("Processing {i:d}/{n:d} {tn} ({cc:d} channels, renders_per_layer:{rpl:d} channel_skip:{cskp})"
                 .format(i=i,n=layer_count,tn=tn,cc=channel_count,rpl=renders_per_layer,cskp=channel_skip))
+
+                if start_channel > -1 : n = start_channel
 
                 while (n >= 0):
                     dd_name = '{num:d}-{tname}-{channel:03d}'.format(num=now(), tname=tnsr, channel=n)
                     render_deepdream(image_dir, dd_name, tf.square(layer[:,:,:,n]), img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
                     n = round(n - channel_skip)
 
+                    # todo - try other operations on the tensor(s) and combine more than one - https://www.tensorflow.org/api_docs/python/tf/square
+                    # There are many interesting things one may try. For example, optimizing a linear combination of features often gives a "mixture" pattern.
+                    # dream_tensor = T(layer_name)[:,:,:,65]+T(layer_name)[:,:,:,139]
 
-            # todo - try other operations on the tensor(s) and combine more than one - https://www.tensorflow.org/api_docs/python/tf/square
+                start_channel=-1
 
-            # There are many interesting things one may try. For example, optimizing a linear combination of features often gives a "mixture" pattern.
-            # dream_tensor = T(layer_name)[:,:,:,65]+T(layer_name)[:,:,:,139]
-
-            print("Done dreaming")
+            print("Dreaming complete. Wake up.")
 
 main()
