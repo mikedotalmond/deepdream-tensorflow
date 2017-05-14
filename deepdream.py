@@ -2,22 +2,28 @@
 
 # boilerplate code
 from __future__ import print_function
+
 import os
-import numpy as np
-from functools import partial
-from numpy.random import randn,seed,randint
+import sys
+import struct
 import cv2
 import math
 import time
-
 import argparse
+
+import numpy as np
+import numpy.random as rnd
+from functools import partial
+
 import tensorflow as tf
+
 from tensorflow.python.platform import gfile
 from tensorflow.python.framework import tensor_shape
+from tensorflow.python.framework.dtypes import DType
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", default='models/inception_graph.pb', help="location of the model to load")
-parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names"])
+parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names", "mangle"])
 parser.add_argument("--input_dir", help="path to folder containing images", default="images")
 parser.add_argument("--input_image", help="image to dream with", default="pilatus800.jpg")
 parser.add_argument("--output_dir", required=True, help="where to put output files")
@@ -25,7 +31,6 @@ parser.add_argument("--output_filetype", default="jpg", choices=["png", "jpg"])
 parser.add_argument("--export_tensor_names", type=bool, default=False, help="Export a list of all dreamable tensors as JSON")
 
 # use in dream mode
-parser.add_argument("--input_tensor", default="input")
 parser.add_argument("--iterations", type=int, default=10)
 parser.add_argument("--step", type=float, default=1.5)
 parser.add_argument("--octaves", type=int, default=4)
@@ -39,7 +44,9 @@ parser.add_argument("--resume_from_channel", default=-1, type=int, help="Resume 
 
 parser.add_argument("--seed", default=123456, type=int)
 a = parser.parse_args()
-seed(a.seed)
+
+a.seed = a.seed if a.seed>0 else int(time.time())
+rnd.seed(a.seed)
 
 # ####################################################
 # Loading and displaying the model graph
@@ -55,14 +62,14 @@ model_fn = a.model #'inception5h\tensorflow_inception_graph.pb'
 graph = tf.Graph()
 sess = tf.InteractiveSession(graph=graph)
 with tf.gfile.FastGFile(model_fn, 'rb') as f:
-    graph_def = tf.GraphDef()
-    graph_def.ParseFromString(f.read())
+  graph_def = tf.GraphDef()
+  graph_def.ParseFromString(f.read())
 
 # define the input tensor
-t_input = tf.placeholder(np.float32, name=a.input_tensor)
-imagenet_mean = 117.0 # ? how is this value determined
+t_input = tf.placeholder(np.float32, name='input')
+imagenet_mean = 117.0 # ? how is this value determined (and what does it do)
 t_preprocessed = tf.expand_dims(t_input-imagenet_mean, 0)
-tf.import_graph_def(graph_def, {a.input_tensor:t_preprocessed})
+tf.import_graph_def(graph_def, {'input':t_preprocessed})
 
 # Helper functions for TF Graph visualization
 
@@ -110,7 +117,7 @@ def rename_nodes(graph_def, rename_func):
 current_layer=None
 current_channel=0
 # start with a gray image with a little noise
-img_noise = np.random.uniform(size=(224,224,3)) + 100.0
+img_noise = rnd.uniform(size=(224,224,3)) + 100.0
 
 def show_array(arr):
     img = np.uint8(np.clip(arr, 0, 1)*255)
@@ -173,7 +180,7 @@ def calc_grad_tiled(img, t_grad, tile_size=512):
     multiple iterations.'''
     sz = tile_size
     h, w = img.shape[:2]
-    sx, sy = np.random.randint(sz, size=2)
+    sx, sy = rnd.randint(sz, size=2)
     img_shift = np.roll(np.roll(img, sx, 1), sy, 0)
     grad = np.zeros_like(img)
     for y in range(0, max(h-sz//2, sz),sz):
@@ -278,9 +285,11 @@ def render_lapnorm(name, t_obj, img0=img_noise, visfunc=visstd,
 # ####################################################
 # DeepDream
 # ####################################################
+def now(): return int(time.time())
 
 def render_deepdream(output_dir, name, t_obj, img0=img_noise,
                      iter_n=10, step=1.5, octave_n=4, octave_scale=1.4):
+
     t_score = tf.reduce_mean(t_obj) # defining the optimization objective
     t_grad = tf.gradients(t_score, t_input)[0] # behold the power of automatic differentiation!
 
@@ -306,23 +315,21 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
             img += g*(step / (np.abs(g).mean()+1e-7))
             #print('.',end = ' ')
 
-        if octave == octave_n-1:
-            fname = output_dir + "/" + name + "_octave-{:d}".format(octave_n)
-            print("Saving:", fname)
-            save_array(img/255.0, fname, a.output_filetype)
+    fname = output_dir + "/" + name + "_octave-{:d}".format(octave_n)
+    print("Saving:", fname)
+    save_array(img/255.0, fname, a.output_filetype)
 
 
-# helpers
-def now(): return int(time.time())
-
-# to find layers to deepdream with we want to match ones with the same shapes/dims as the examples (?,?,?,int)
-target_shape = tf.TensorShape([None, None, None, 512])# T("mixed4d_3x3_bottleneck_pre_relu").shape
-target_dims = len(target_shape)
-
-# add layer names here to ignore them while dreaming
-ignore_layers = ["avgpool0"] # processing avgpool0 generates an error ("computed output size would be negative")
-
+#
+#
 def dreamable_shape(name):
+
+    # to find layers to deepdream with we want to match ones with the same shapes/dims as the examples (?,?,?,int)
+    target_shape = tf.TensorShape([None, None, None, 512])# T("mixed4d_3x3_bottleneck_pre_relu").shape
+    target_dims = len(target_shape)
+
+    # add layer names here to ignore them while dreaming
+    ignore_layers = ["avgpool0"] # processing avgpool0 generates an error ("computed output size would be negative")
 
     if name in ignore_layers: return False
 
@@ -355,6 +362,7 @@ def setup_layers():
     else:
         # use all of the dreamable tensors in the graph
         names = [n.name for n in graph_def.node if dreamable_shape(n.name)]
+
 
     feature_counts = [int(T(n).get_shape()[-1]) for n in names]
     feature_count = sum(feature_counts)
@@ -439,7 +447,7 @@ def main():
 
             # prepare the input image
             if(source_image == "noise"):
-                img0 = np.random.uniform(size=(1080,1920,3))
+                img0 = rnd.uniform(size=(1080,1920,3))
             else:
                 img0 = cv2.imread(a.input_dir + "/" + a.input_image)
 
