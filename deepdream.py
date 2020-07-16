@@ -15,17 +15,18 @@ import numpy as np
 import numpy.random as rnd
 from functools import partial
 
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
 from tensorflow.python.platform import gfile
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework.dtypes import DType
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", default='models/inception_graph.pb', help="location of the model to load")
+parser.add_argument("--model", default='models/tensorflow_inception_graph.pb', help="location of the model to load")
 parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names", "mangle"])
 parser.add_argument("--input_dir", help="path to folder containing images", default="images")
-parser.add_argument("--input_image", help="image to dream with", default="pilatus800.jpg")
+parser.add_argument("--input_image", help="image to dream with", default="000003.png") # can be 'noise' special value
 parser.add_argument("--output_dir", required=True, help="where to put output files")
 parser.add_argument("--output_filetype", default="jpg", choices=["png", "jpg"])
 parser.add_argument("--export_tensor_names", type=bool, default=False, help="Export a list of all dreamable tensors as JSON")
@@ -447,7 +448,8 @@ def main():
 
             # prepare the input image
             if(source_image == "noise"):
-                img0 = rnd.uniform(size=(1080,1920,3))
+                # img0 = rnd.uniform(size=(1080,1920,3))
+                img0 = rnd.uniform(size=(512,512,3))
             else:
                 img0 = cv2.imread(a.input_dir + "/" + a.input_image)
 
