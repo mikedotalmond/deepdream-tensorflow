@@ -15,6 +15,8 @@ import numpy as np
 import numpy.random as rnd
 from functools import partial
 
+from random import shuffle
+
 import tensorflow.compat.v1 as tf
 tf.disable_v2_behavior()
 
@@ -24,7 +26,7 @@ from tensorflow.python.framework.dtypes import DType
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", default='models/tensorflow_inception_graph.pb', help="location of the model to load")
-parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names", "mangle"])
+parser.add_argument("--mode", required=True, choices=["graph", "naive", "multiscale", "lapnorm", "dream", "export_tensor_names"])
 parser.add_argument("--input_dir", help="path to folder containing images", default="images")
 parser.add_argument("--input_image", help="image to dream with", default="000003.png") # can be 'noise' special value
 parser.add_argument("--output_dir", required=True, help="where to put output files")
@@ -32,6 +34,7 @@ parser.add_argument("--output_filetype", default="jpg", choices=["png", "jpg"])
 parser.add_argument("--export_tensor_names", type=bool, default=False, help="Export a list of all dreamable tensors as JSON")
 
 # use in dream mode
+parser.add_argument("--shuffle", default='no',  choices=["yes", "no"])
 parser.add_argument("--iterations", type=int, default=10)
 parser.add_argument("--step", type=float, default=1.5)
 parser.add_argument("--octaves", type=int, default=4)
@@ -65,6 +68,8 @@ sess = tf.InteractiveSession(graph=graph)
 with tf.gfile.FastGFile(model_fn, 'rb') as f:
   graph_def = tf.GraphDef()
   graph_def.ParseFromString(f.read())
+
+inputName = "image"# input tensor names - inception v3:"image",  inception_v4:"InputImage"
 
 # define the input tensor
 t_input = tf.placeholder(np.float32, name='input')
@@ -294,6 +299,13 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
     t_score = tf.reduce_mean(t_obj) # defining the optimization objective
     t_grad = tf.gradients(t_score, t_input)[0] # behold the power of automatic differentiation!
 
+    fname = output_dir + "/" + name + "_octave-{:d}".format(octave_n)
+    savename = "{d}/{n}.{e}".format(d=a.output_dir, n=fname, e=a.output_filetype)
+
+    if os.path.exists(savename):
+        print("skip existing " + fname)
+        return
+
     print("Rendering {a}/{b} ({c:d} octaves)".format(a=output_dir, b=name,c=octave_n))
 
     # split the image into a number of octaves
@@ -316,7 +328,6 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
             img += g*(step / (np.abs(g).mean()+1e-7))
             #print('.',end = ' ')
 
-    fname = output_dir + "/" + name + "_octave-{:d}".format(octave_n)
     print("Saving:", fname)
     save_array(img/255.0, fname, a.output_filetype)
 
@@ -360,6 +371,7 @@ def setup_layers():
         with open(a.layer_names) as f:
             lines = f.read().splitlines()
             names = [n for n in lines if dreamable_shape(n)]
+            if a.shuffle == "yes": shuffle(names)
     else:
         # use all of the dreamable tensors in the graph
         names = [n.name for n in graph_def.node if dreamable_shape(n.name)]
@@ -526,7 +538,7 @@ def main():
                 if start_channel > -1 : n = start_channel
 
                 while (n >= 0):
-                    dd_name = '{num:d}-{tname}-{channel:03d}'.format(num=now(), tname=tnsr, channel=n)
+                    dd_name = '{tname}-{channel:03d}'.format(tname=tnsr, channel=n)
                     render_deepdream(image_dir, dd_name, tf.square(layer[:,:,:,n]), img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
                     n = round(n - channel_skip)
 
