@@ -296,9 +296,6 @@ def now(): return int(time.time())
 def render_deepdream(output_dir, name, t_obj, img0=img_noise,
                      iter_n=10, step=1.5, octave_n=4, octave_scale=1.4):
 
-    t_score = tf.reduce_mean(t_obj) # defining the optimization objective
-    t_grad = tf.gradients(t_score, t_input)[0] # behold the power of automatic differentiation!
-
     fname = output_dir + "/" + name + "_octave-{:d}".format(octave_n)
     savename = "{d}/{n}.{e}".format(d=a.output_dir, n=fname, e=a.output_filetype)
 
@@ -307,6 +304,11 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
         return
 
     print("Rendering {a}/{b} ({c:d} octaves)".format(a=output_dir, b=name,c=octave_n))
+    
+    
+    t_score = tf.reduce_mean(t_obj) # defining the optimization objective
+    t_grad = tf.gradients(t_score, t_input)[0] # behold the power of automatic differentiation!
+
 
     # split the image into a number of octaves
     img = img0
