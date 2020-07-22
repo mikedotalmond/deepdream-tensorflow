@@ -39,6 +39,7 @@ parser.add_argument("--iterations", type=int, default=10)
 parser.add_argument("--step", type=float, default=1.5)
 parser.add_argument("--octaves", type=int, default=4)
 parser.add_argument("--octave_scale", type=float, default=1.4)
+parser.add_argument("--render_list", default=None, help="Render all listed layers/channels from a list. Expects a text file with each entry on a new line - `tensorname-#channel`")
 parser.add_argument("--renders_per_layer", type=int, default=3, help="Number of channels to render from a layer. Set to zero to render all channels")
 parser.add_argument("--layer_name", default=None, help="Render channels from a single layer (use --export_tensor_names to get a list of all dreamable tensors)")
 parser.add_argument("--layer_names", default=None, help="Render channels from a list of layers. Expects a text file with each entry on a new line (use --export_tensor_names to get a list of all dreamable tensors)")
@@ -338,6 +339,16 @@ def render_deepdream(output_dir, name, t_obj, img0=img_noise,
 #
 def dreamable_shape(name):
 
+    test = None
+
+    # example with channel number - conv2d2_pre_relu-051
+    if name.index("-") > -1:
+        test = name[:-4]
+        #print("layer has channel number " + test)
+        #print(name[-3:]) # channel num - always 3 digits
+    else:
+        test = name
+
     # to find layers to deepdream with we want to match ones with the same shapes/dims as the examples (?,?,?,int)
     target_shape = tf.TensorShape([None, None, None, 512])# T("mixed4d_3x3_bottleneck_pre_relu").shape
     target_dims = len(target_shape)
@@ -345,9 +356,9 @@ def dreamable_shape(name):
     # add layer names here to ignore them while dreaming
     ignore_layers = ["avgpool0"] # processing avgpool0 generates an error ("computed output size would be negative")
 
-    if name in ignore_layers: return False
+    if test in ignore_layers: return False
 
-    layer = T(name)
+    layer = T(test)
 
     if layer.shape.dims is None: return False
     if not len(layer.shape) is target_dims: return False
@@ -366,8 +377,16 @@ def dreamable_shape(name):
 # collect and filter tensor names so we only attempt to dream with ones that have the required shape/dims
 def setup_layers():
     names = None
+    
+    if a.render_list is not None:
+        print("loading render_list from file:", a.render_list)
+        with open(a.render_list) as f:
+            lines = f.read().splitlines()
+            names = [n for n in lines if dreamable_shape(n)]
+            if a.shuffle == "yes": shuffle(names)
 
-    if a.layer_names is not None:
+
+    elif a.layer_names is not None:
         # use a custom list of tensor names
         print("loading layer names from file:", a.layer_names)
         with open(a.layer_names) as f:
@@ -379,12 +398,16 @@ def setup_layers():
         names = [n.name for n in graph_def.node if dreamable_shape(n.name)]
 
 
-    feature_counts = [int(T(n).get_shape()[-1]) for n in names]
-    feature_count = sum(feature_counts)
-
     print('Loaded model:', model_fn)
-    print('Number of layers', len(names))
-    print('Total number of feature channels:', feature_count)
+
+    if a.render_list is None:
+        feature_counts = [int(T(n).get_shape()[-1]) for n in names]
+        feature_count = sum(feature_counts)
+
+        print('layers:', len(names))
+        print('feature channels:', feature_count)
+    else:
+        print('features to render:', len(names))
 
     return names
 
@@ -449,7 +472,6 @@ def main():
             dd_octave_scale = a.octave_scale#1.4
             renders_per_layer = a.renders_per_layer
             if renders_per_layer<0: renders_per_layer=0
-
             # manually set this to skip into the process and resume rendering dreams where you left off
             start_tensor = a.resume_from_layer #"mixed3a_3x3_bottleneck_pre_relu"
             start_channel = a.resume_from_channel
@@ -468,6 +490,28 @@ def main():
                 img0 = cv2.imread(a.input_dir + "/" + a.input_image)
 
             img0 = np.float32(img0)
+
+
+            if a.render_list is not None:
+                # just render all listed items - names should include channel number at the end `{tensorname}-###`
+                n = len(dreamy_tensors)
+                print("rendinging {n:d} features)".format(n=n))
+
+                for i in range(n):
+                    tn = dreamy_tensors[i][:-4] # trim channel num from end of tensor name
+                    channel = int(dreamy_tensors[i][-3:]) # channel num - always the last 3 digits
+                    
+                    layer = T(tn) 
+                    tnsr = tn.replace("/","__")
+
+                    print("Processing {i:d}/{n:d} {tn})".format(i=i,n=n,tn=tn))
+
+                    dd_name = '{tname}-{channel:03d}'.format(tname=tnsr, channel=channel)
+                    render_deepdream(image_dir, dd_name, tf.square(layer[:,:,:,channel]), img0, dd_iterations, dd_step, dd_octaves, dd_octave_scale)
+
+                print("done")
+                return
+                
 
 
             render_count=0
@@ -504,7 +548,7 @@ def main():
                 start_channel = -1
 
             for i in range(layer_start, layer_count):
-
+                
                 tn = dreamy_tensors[i]
 
                 layer = T(tn)
